@@ -1,0 +1,57 @@
+name: Validate CJK fonts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fonts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: fix/chrome-cjk-fonts
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.18.1
+      - name: Build original and corrected images
+        run: |
+          git show HEAD^:docker/chrome/Dockerfile > /tmp/Dockerfile.before
+          docker build -f /tmp/Dockerfile.before -t chrome-before .
+          docker build -f docker/chrome/Dockerfile -t chrome-after .
+          docker image inspect chrome-before chrome-after --format '{{.RepoTags}} {{.Size}}'
+      - name: Reproduce missing CJK fonts
+        timeout-minutes: 2
+        run: |
+          docker run -d --name chrome-fonts --init -p 9222:9222 chrome-before
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://localhost:9222/json/version > /dev/null && break
+            sleep 1
+          done
+          if node docker/chrome/test-fonts.mjs > baseline.log 2>&1; then
+            cat baseline.log
+            echo 'Expected the original image to fail CJK rendering'
+            exit 1
+          fi
+          cat baseline.log
+          grep 'zh-Hans:' baseline.log
+          docker rm -f chrome-fonts
+      - name: Verify corrected CJK rendering
+        timeout-minutes: 2
+        run: |
+          docker run -d --name chrome-fonts --init -p 9222:9222 chrome-after
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://localhost:9222/json/version > /dev/null && break
+            sleep 1
+          done
+          node docker/chrome/test-fonts.mjs
+      - name: Formatting and lint
+        run: |
+          npx --yes oxfmt@0.45.0 --check docker/chrome/test-fonts.mjs .github/workflows/chrome.yml
+          npx --yes oxlint@1.60.0 docker/chrome/test-fonts.mjs
+          git diff --check
